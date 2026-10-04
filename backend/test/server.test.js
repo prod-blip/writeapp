@@ -94,6 +94,13 @@ test("privacy policy is public and describes AI data handling", async () => {
   assert.match(policy, /atulmailing@gmail\.com/);
 });
 
+test("privacy policy supports HEAD requests from store validators", async () => {
+  const response = await fetch(`${baseUrl}/privacy`, { method: "HEAD" });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /^text\/html/);
+  assert.equal(await response.text(), "");
+});
+
 test("improvement endpoint requires authorization", async () => {
   const response = await fetch(`${baseUrl}/v1/ai/improvements`, {
     method: "POST",

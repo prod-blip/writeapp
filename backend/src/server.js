@@ -23,14 +23,14 @@ export function createClearWriteServer(
     if (request.method === "GET" && request.url === "/health") {
       return sendJson(response, 200, { status: "ok", provider: env.AI_PROVIDER || "mock" });
     }
-    if (request.method === "GET" && request.url === "/privacy") {
+    if ((request.method === "GET" || request.method === "HEAD") && request.url === "/privacy") {
       response.setHeader(
         "Content-Security-Policy",
         "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       );
       response.setHeader("X-Frame-Options", "DENY");
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      return response.end(privacyPolicyHtml);
+      return response.end(request.method === "HEAD" ? undefined : privacyPolicyHtml);
     }
 
     const clientId = request.socket.remoteAddress || "local";
