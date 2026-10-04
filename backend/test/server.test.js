@@ -69,6 +69,17 @@ test("health endpoint is public", async () => {
   assert.deepEqual(await response.json(), { status: "ok", provider: "mock" });
 });
 
+test("privacy policy is public and describes AI data handling", async () => {
+  const response = await fetch(`${baseUrl}/privacy`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /^text\/html/);
+  const policy = await response.text();
+  assert.match(policy, /ClearWrite Privacy Policy/);
+  assert.match(policy, /store: false/);
+  assert.match(policy, /up to 30 days/);
+  assert.match(policy, /atulmailing@gmail\.com/);
+});
+
 test("improvement endpoint requires authorization", async () => {
   const response = await fetch(`${baseUrl}/v1/ai/improvements`, {
     method: "POST",

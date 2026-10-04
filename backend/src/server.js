@@ -2,6 +2,7 @@ import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { improveWriting, ProviderError } from "./ai.js";
 import { GooglePlayError, verifyGooglePlaySubscription } from "./googlePlay.js";
+import { privacyPolicyHtml } from "./privacy.js";
 
 const MAX_BODY_BYTES = 16_384;
 const WINDOW_MS = 60_000;
@@ -16,6 +17,15 @@ export function createClearWriteServer(
     setSecurityHeaders(response);
     if (request.method === "GET" && request.url === "/health") {
       return sendJson(response, 200, { status: "ok", provider: env.AI_PROVIDER || "mock" });
+    }
+    if (request.method === "GET" && request.url === "/privacy") {
+      response.setHeader(
+        "Content-Security-Policy",
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      );
+      response.setHeader("X-Frame-Options", "DENY");
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return response.end(privacyPolicyHtml);
     }
 
     const clientId = request.socket.remoteAddress || "local";
