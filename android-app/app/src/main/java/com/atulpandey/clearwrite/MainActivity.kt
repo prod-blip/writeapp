@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +26,7 @@ import com.atulpandey.clearwrite.theme.ClearWriteTheme
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    installSplashScreen()
     super.onCreate(savedInstanceState)
 
     enableEdgeToEdge()

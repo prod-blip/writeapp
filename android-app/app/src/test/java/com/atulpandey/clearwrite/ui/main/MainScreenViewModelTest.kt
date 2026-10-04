@@ -161,7 +161,24 @@ class MainScreenViewModelTest {
     assertEquals("Keep this. This section is wordy. Keep that.", viewModel.uiState.value.text)
     assertTrue(viewModel.uiState.value.appliedAiHighlight != null)
     assertEquals(text, viewModel.uiState.value.undoText)
+    assertEquals("AI suggestion is applied", viewModel.uiState.value.message)
+    mainDispatcher.scheduler.advanceTimeBy(4_999)
+    assertTrue(viewModel.uiState.value.appliedAiHighlight != null)
+    mainDispatcher.scheduler.advanceTimeBy(1)
+    mainDispatcher.scheduler.runCurrent()
+    assertEquals(null, viewModel.uiState.value.appliedAiHighlight)
     mainDispatcher.scheduler.advanceUntilIdle()
+  }
+
+  @Test
+  fun documentTitle_canBeSetByUser() {
+    val viewModel = MainScreenViewModel(analysisDispatcher = mainDispatcher)
+    viewModel.onTextChanged("The first line should not replace a custom title.")
+
+    viewModel.renameCurrentDocument("  My essay title  ")
+
+    assertEquals("My essay title", viewModel.uiState.value.activeDocumentTitle)
+    assertEquals("My essay title", viewModel.uiState.value.savedDocuments.single().title)
   }
 
   @Test

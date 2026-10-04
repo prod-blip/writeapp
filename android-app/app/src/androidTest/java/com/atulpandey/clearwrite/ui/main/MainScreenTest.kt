@@ -248,6 +248,46 @@ class MainScreenTest {
   }
 
   @Test
+  fun useSuggestion_replacesManualSelectionInEditor() {
+    val originalDocument = "Before. Like a lot of us. After."
+    val originalSelection = "Like a lot of us"
+    val replacement = "Like many of us"
+    val start = originalDocument.indexOf(originalSelection)
+    val target = AiRewriteTarget(start, start + originalSelection.length, originalSelection)
+    val suggestion = AiSuggestion(replacement, "Shorter while preserving meaning.")
+    val updatedDocument = originalDocument.replaceRange(target.startOffset, target.endOffset, replacement)
+
+    composeTestRule.setContent {
+      var state by remember {
+        mutableStateOf(
+          MainScreenUiState(
+            text = originalDocument,
+            documentRevision = 1,
+            aiRewriteState = AiRewriteState.Ready(target, listOf(suggestion), emptyList()),
+          )
+        )
+      }
+      ClearWriteTheme {
+        TestEditor(
+          uiState = state,
+          onApplyAiSuggestion = {
+            state =
+              state.copy(
+                text = updatedDocument,
+                documentRevision = 2,
+                aiRewriteState = AiRewriteState.Idle,
+                appliedAiHighlight = AppliedAiHighlight(target.startOffset, target.startOffset + replacement.length, 2),
+              )
+          },
+        )
+      }
+    }
+
+    composeTestRule.onNodeWithText("Use suggestion").performClick()
+    composeTestRule.onNodeWithText(updatedDocument).assertExists()
+  }
+
+  @Test
   fun firstAiUse_explainsDataSharingBeforeContinue() {
     val text = "This is very hard to read."
     val state =
@@ -291,6 +331,7 @@ private fun TestEditor(
   uiState: MainScreenUiState,
   onTextChanged: (String) -> Unit = {},
   onIssueCategorySelected: (AnalysisCategory) -> Unit = {},
+  onApplyAiSuggestion: (AiSuggestion) -> Unit = {},
 ) {
   EditorScreen(
     uiState = uiState,
@@ -307,11 +348,12 @@ private fun TestEditor(
     onSelectionRewriteRequested = { _, _ -> },
     onSelectionRewriteAction = { _, _, _ -> },
     onDismissSelectionRewrite = {},
-    onApplyAiSuggestion = {},
+    onApplyAiSuggestion = onApplyAiSuggestion,
     onConfirmAiConsent = {},
     onRetryAi = {},
     onDismissAi = {},
     onUndoAiEdit = {},
+    onRenameDocument = {},
     onMenuDestinationSelected = {},
     onMessageShown = {},
   )

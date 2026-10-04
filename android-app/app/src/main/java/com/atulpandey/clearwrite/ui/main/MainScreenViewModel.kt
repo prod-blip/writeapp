@@ -13,6 +13,7 @@ import com.atulpandey.clearwrite.analysis.WritingIssue
 import com.atulpandey.clearwrite.analysis.WritingAnalyzer
 import com.atulpandey.clearwrite.analysis.WritingGoal
 import com.atulpandey.clearwrite.data.ClearWriteLocalStore
+import com.atulpandey.clearwrite.data.SavedDocument
 import com.atulpandey.clearwrite.data.ThemePreference
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineDispatcher
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 const val FREE_WORD_LIMIT = 1_500
 const val PRO_WORD_LIMIT = 10_000
@@ -100,6 +102,8 @@ data class MainScreenUiState(
   val selectionRewriteHintDismissed: Boolean = false,
   val isPro: Boolean = false,
   val ignoredIssueKeys: Set<String> = emptySet(),
+  val savedDocuments: List<SavedDocument> = emptyList(),
+  val activeDocumentId: String? = null,
 ) {
   val wordCount: Int = countWords(text)
   val wordLimit: Int = if (isPro) PRO_WORD_LIMIT else FREE_WORD_LIMIT
@@ -119,6 +123,11 @@ data class MainScreenUiState(
     }
   val hasPreviousIssue: Boolean = selectedIssueNumber > 1
   val hasNextIssue: Boolean = selectedIssueNumber in 1 until selectedIssueCount
+  val activeDocumentTitle: String
+    get() =
+      savedDocuments.firstOrNull { it.id == activeDocumentId }?.title
+        ?: importedFileName?.substringBeforeLast('.')?.takeIf { it.isNotBlank() }
+        ?: "Untitled document"
 }
 
 class MainScreenViewModel(
@@ -137,20 +146,37 @@ class MainScreenViewModel(
     localStore?.let { store ->
       viewModelScope.launch {
         val stored = store.state.first()
+        val migratedDocument =
+          if (stored.documents.isEmpty() && stored.documentText.isNotBlank()) {
+            SavedDocument(
+              title = documentTitle(stored.documentText, stored.importedFileName),
+              text = stored.documentText,
+              importedFileName = stored.importedFileName,
+            )
+          } else null
+        val documents = stored.documents.ifEmpty { listOfNotNull(migratedDocument) }
+        val activeDocument =
+          documents.firstOrNull { it.id == stored.activeDocumentId }
+            ?: documents.firstOrNull()
         _uiState.update { current ->
           val canRestoreDocument = current.documentRevision == 0 && current.text.isEmpty()
           current.copy(
-            text = if (canRestoreDocument) stored.documentText else current.text,
+            text = if (canRestoreDocument) (activeDocument?.text ?: stored.documentText) else current.text,
             importedFileName =
-              if (canRestoreDocument) stored.importedFileName else current.importedFileName,
+              if (canRestoreDocument) (activeDocument?.importedFileName ?: stored.importedFileName) else current.importedFileName,
             enabledChecks = stored.enabledChecks,
             showWordCount = stored.showWordCount,
             aiConsentGranted = stored.aiConsentGranted,
             themePreference = stored.themePreference,
             writingGoal = stored.writingGoal,
             selectionRewriteHintDismissed = stored.selectionRewriteHintDismissed,
-            saveState = if (canRestoreDocument && stored.documentText.isNotEmpty()) SaveState.SAVED else current.saveState,
+            saveState = if (canRestoreDocument && (activeDocument?.text ?: stored.documentText).isNotEmpty()) SaveState.SAVED else current.saveState,
+            savedDocuments = documents,
+            activeDocumentId = activeDocument?.id ?: stored.activeDocumentId,
           )
+        }
+        if (migratedDocument != null) {
+          store.saveDocumentLibrary(documents, migratedDocument.id)
         }
         scheduleAnalysis(AUTO_ANALYSIS_PASTE_DELAY_MILLIS)
       }
@@ -383,7 +409,7 @@ class MainScreenViewModel(
         undoText = current.text,
         undoImportedFileName = current.importedFileName,
         saveState = SaveState.SAVED,
-        message = "AI suggestion applied. The updated passage is marked in the draft.",
+        message = "AI suggestion is applied",
         messageTone = MessageTone.SUCCESS,
       )
     }
@@ -398,6 +424,7 @@ class MainScreenViewModel(
     }
     val appliedState = _uiState.value
     if (appliedHighlight != null) {
+      pendingAiRewrite = null
       persistDocumentNow(appliedState.text, appliedState.importedFileName)
       scheduleAnalysis(AUTO_ANALYSIS_PASTE_DELAY_MILLIS)
     }
@@ -435,6 +462,26 @@ class MainScreenViewModel(
     draftSaveJob?.cancel()
     analysisJob?.cancel()
     val current = _uiState.value
+    if (current.isPro) {
+      val now = System.currentTimeMillis()
+      val savedCurrent = upsertSavedDocument(current.savedDocuments, current.activeDocumentId, current.text, current.importedFileName, now)
+      val newDocument = SavedDocument(createdAt = now, updatedAt = now)
+      val documents = savedCurrent + newDocument
+      _uiState.value =
+        MainScreenUiState(
+          enabledChecks = current.enabledChecks,
+          showWordCount = current.showWordCount,
+          aiConsentGranted = current.aiConsentGranted,
+          themePreference = current.themePreference,
+          writingGoal = current.writingGoal,
+          selectionRewriteHintDismissed = current.selectionRewriteHintDismissed,
+          isPro = true,
+          savedDocuments = documents,
+          activeDocumentId = newDocument.id,
+        )
+      viewModelScope.launch { localStore?.saveDocumentLibrary(documents, newDocument.id) }
+      return
+    }
     _uiState.value =
       MainScreenUiState(
         enabledChecks = current.enabledChecks,
@@ -444,8 +491,80 @@ class MainScreenViewModel(
         writingGoal = current.writingGoal,
         selectionRewriteHintDismissed = current.selectionRewriteHintDismissed,
         isPro = current.isPro,
+        savedDocuments = emptyList(),
       )
-    viewModelScope.launch { localStore?.clearDocument() }
+    viewModelScope.launch {
+      localStore?.clearDocument()
+      localStore?.saveDocumentLibrary(emptyList(), null)
+    }
+  }
+
+  fun openDocument(documentId: String) {
+    val current = _uiState.value
+    val document = current.savedDocuments.firstOrNull { it.id == documentId } ?: return
+    draftSaveJob?.cancel()
+    analysisJob?.cancel()
+    _uiState.value =
+      MainScreenUiState(
+        text = document.text,
+        importedFileName = document.importedFileName,
+        saveState = if (document.text.isNotBlank()) SaveState.SAVED else SaveState.IDLE,
+        enabledChecks = current.enabledChecks,
+        showWordCount = current.showWordCount,
+        aiConsentGranted = current.aiConsentGranted,
+        themePreference = current.themePreference,
+        writingGoal = current.writingGoal,
+        selectionRewriteHintDismissed = current.selectionRewriteHintDismissed,
+        isPro = current.isPro,
+        savedDocuments = current.savedDocuments,
+        activeDocumentId = document.id,
+      )
+    viewModelScope.launch { localStore?.saveDocumentLibrary(current.savedDocuments, document.id) }
+    scheduleAnalysis(AUTO_ANALYSIS_PASTE_DELAY_MILLIS)
+  }
+
+  fun deleteCurrentDocument() {
+    val current = _uiState.value
+    if (!current.isPro) {
+      startNewDocument()
+      return
+    }
+    val remaining = current.savedDocuments.filterNot { it.id == current.activeDocumentId }
+    val next = remaining.firstOrNull()
+    if (next == null) {
+      _uiState.value =
+        MainScreenUiState(
+          enabledChecks = current.enabledChecks,
+          showWordCount = current.showWordCount,
+          aiConsentGranted = current.aiConsentGranted,
+          themePreference = current.themePreference,
+          writingGoal = current.writingGoal,
+          selectionRewriteHintDismissed = current.selectionRewriteHintDismissed,
+          isPro = true,
+        )
+      viewModelScope.launch {
+        localStore?.clearDocument()
+        localStore?.saveDocumentLibrary(emptyList(), null)
+      }
+      return
+    }
+    _uiState.value =
+      MainScreenUiState(
+        text = next.text,
+        importedFileName = next.importedFileName,
+        saveState = if (next.text.isNotBlank()) SaveState.SAVED else SaveState.IDLE,
+        enabledChecks = current.enabledChecks,
+        showWordCount = current.showWordCount,
+        aiConsentGranted = current.aiConsentGranted,
+        themePreference = current.themePreference,
+        writingGoal = current.writingGoal,
+        selectionRewriteHintDismissed = current.selectionRewriteHintDismissed,
+        isPro = true,
+        savedDocuments = remaining,
+        activeDocumentId = next.id,
+      )
+    viewModelScope.launch { localStore?.saveDocumentLibrary(remaining, next.id) }
+    scheduleAnalysis(AUTO_ANALYSIS_PASTE_DELAY_MILLIS)
   }
 
   fun setCheckEnabled(category: AnalysisCategory, enabled: Boolean) {
@@ -506,6 +625,29 @@ class MainScreenViewModel(
     if (changed) scheduleAnalysis(AUTO_ANALYSIS_SETTINGS_DELAY_MILLIS)
   }
 
+  fun renameCurrentDocument(title: String) {
+    val normalizedTitle = title.trim().replace(Regex("\\s+"), " ").take(MAX_DOCUMENT_TITLE_CHARACTERS)
+    if (normalizedTitle.isBlank()) return
+    val current = _uiState.value
+    val now = System.currentTimeMillis()
+    val activeId = current.activeDocumentId ?: UUID.randomUUID().toString()
+    val existing = current.savedDocuments.firstOrNull { it.id == activeId }
+    val renamed =
+      SavedDocument(
+        id = activeId,
+        title = normalizedTitle,
+        text = current.text,
+        importedFileName = current.importedFileName,
+        createdAt = existing?.createdAt ?: now,
+        updatedAt = now,
+      )
+    val documents =
+      if (existing == null) current.savedDocuments + renamed
+      else current.savedDocuments.map { if (it.id == activeId) renamed else it }
+    _uiState.update { it.copy(savedDocuments = documents, activeDocumentId = activeId, saveState = SaveState.SAVED) }
+    viewModelScope.launch { localStore?.saveDocumentLibrary(documents, activeId) }
+  }
+
   fun resetAiConsent() {
     _uiState.update { it.copy(aiConsentGranted = false, aiRewriteState = AiRewriteState.Idle) }
     viewModelScope.launch { localStore?.saveAiConsent(false) }
@@ -516,7 +658,13 @@ class MainScreenViewModel(
   }
 
   fun clearMessage() {
-    _uiState.update { it.copy(message = null) }
+    _uiState.update {
+      it.copy(
+        message = null,
+        undoText = null,
+        undoImportedFileName = null,
+      )
+    }
   }
 
   fun dismissSelectionRewriteHint() {
@@ -628,10 +776,18 @@ class MainScreenViewModel(
   private fun scheduleDocumentSave() {
     val snapshot = _uiState.value
     draftSaveJob?.cancel()
-    draftSaveJob =
+      draftSaveJob =
       viewModelScope.launch {
         delay(DRAFT_SAVE_DEBOUNCE_MILLIS)
-        localStore?.saveDocument(snapshot.text, snapshot.importedFileName)
+        val store = localStore
+        if (store != null) {
+          val current = _uiState.value
+          val activeId = current.activeDocumentId ?: UUID.randomUUID().toString()
+          val documents = upsertSavedDocument(current.savedDocuments, activeId, snapshot.text, snapshot.importedFileName, System.currentTimeMillis())
+          _uiState.update { latest -> latest.copy(savedDocuments = documents, activeDocumentId = activeId) }
+          store.saveDocument(snapshot.text, snapshot.importedFileName)
+          store.saveDocumentLibrary(documents, activeId)
+        }
         _uiState.update { current ->
           if (current.documentRevision == snapshot.documentRevision && current.text == snapshot.text) {
             current.copy(saveState = SaveState.SAVED)
@@ -698,9 +854,45 @@ class MainScreenViewModel(
   private fun persistDocumentNow(text: String, importedFileName: String?) {
     val store = localStore ?: return
     draftSaveJob?.cancel()
-    viewModelScope.launch { store.saveDocument(text, importedFileName) }
+    val current = _uiState.value
+    val now = System.currentTimeMillis()
+    val activeId = current.activeDocumentId ?: UUID.randomUUID().toString()
+    val documents = upsertSavedDocument(current.savedDocuments, activeId, text, importedFileName, now)
+    _uiState.update { it.copy(savedDocuments = documents, activeDocumentId = activeId) }
+    viewModelScope.launch {
+      store.saveDocument(text, importedFileName)
+      store.saveDocumentLibrary(documents, activeId)
+    }
   }
 }
+
+private fun upsertSavedDocument(
+  documents: List<SavedDocument>,
+  activeId: String?,
+  text: String,
+  importedFileName: String?,
+  now: Long,
+): List<SavedDocument> {
+  val id = activeId ?: UUID.randomUUID().toString()
+  val existing = documents.firstOrNull { it.id == id }
+  val updated =
+    SavedDocument(
+      id = id,
+      title =
+        existing?.title?.takeUnless { it == "Untitled document" }
+          ?: documentTitle(text, importedFileName),
+      text = text,
+      importedFileName = importedFileName,
+      createdAt = existing?.createdAt ?: now,
+      updatedAt = now,
+    )
+  return if (existing == null) documents + updated else documents.map { if (it.id == id) updated else it }
+}
+
+private fun documentTitle(text: String, importedFileName: String?): String =
+  importedFileName?.substringBeforeLast('.')?.takeIf { it.isNotBlank() }
+    ?: text.lineSequence().map { it.trim() }.firstOrNull { it.isNotBlank() }?.take(48)
+    ?: "Untitled document"
 
 private data class PendingAiRewrite(
   val target: AiRewriteTarget,
@@ -774,7 +966,8 @@ private val sentenceTerminators = setOf('.', '!', '?')
 private fun WritingIssue.stableKey(): String =
   "${category.name}:$startOffset:$endOffset"
 private const val CONTEXT_CHARACTER_LIMIT = 500
-private const val AI_APPLIED_HIGHLIGHT_MILLIS = 2_500L
+const val MAX_DOCUMENT_TITLE_CHARACTERS = 80
+private const val AI_APPLIED_HIGHLIGHT_MILLIS = 5_000L
 private const val DRAFT_SAVE_DEBOUNCE_MILLIS = 350L
 private const val AUTO_ANALYSIS_PASTE_DELAY_MILLIS = 300L
 private const val AUTO_ANALYSIS_TYPING_DELAY_MILLIS = 1_000L

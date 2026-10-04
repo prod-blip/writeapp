@@ -14,6 +14,9 @@ import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.UUID
 
 enum class ThemePreference {
   SYSTEM,
@@ -30,12 +33,25 @@ data class StoredClearWriteState(
   val themePreference: ThemePreference = ThemePreference.SYSTEM,
   val writingGoal: WritingGoal = WritingGoal.GENERAL,
   val selectionRewriteHintDismissed: Boolean = false,
+  val documents: List<SavedDocument> = emptyList(),
+  val activeDocumentId: String? = null,
+)
+
+data class SavedDocument(
+  val id: String = UUID.randomUUID().toString(),
+  val title: String = "Untitled document",
+  val text: String = "",
+  val importedFileName: String? = null,
+  val createdAt: Long = System.currentTimeMillis(),
+  val updatedAt: Long = createdAt,
 )
 
 interface ClearWriteLocalStore {
   val state: Flow<StoredClearWriteState>
 
   suspend fun saveDocument(text: String, importedFileName: String?)
+
+  suspend fun saveDocumentLibrary(documents: List<SavedDocument>, activeDocumentId: String?)
 
   suspend fun clearDocument()
 
@@ -89,6 +105,8 @@ class DataStoreClearWriteLocalStore(context: Context) : ClearWriteLocalStore {
               ?.let { storedName -> WritingGoal.entries.firstOrNull { it.name == storedName } }
               ?: WritingGoal.GENERAL,
           selectionRewriteHintDismissed = preferences[selectionRewriteHintDismissedKey] ?: false,
+          documents = decodeDocuments(preferences[documentsKey]),
+          activeDocumentId = preferences[activeDocumentIdKey],
         )
       }
 
@@ -104,6 +122,17 @@ class DataStoreClearWriteLocalStore(context: Context) : ClearWriteLocalStore {
     dataStore.edit { preferences ->
       preferences.remove(documentTextKey)
       preferences.remove(importedFileNameKey)
+    }
+  }
+
+  override suspend fun saveDocumentLibrary(
+    documents: List<SavedDocument>,
+    activeDocumentId: String?,
+  ) {
+    dataStore.edit { preferences ->
+      preferences[documentsKey] = encodeDocuments(documents)
+      if (activeDocumentId == null) preferences.remove(activeDocumentIdKey)
+      else preferences[activeDocumentIdKey] = activeDocumentId
     }
   }
 
@@ -140,5 +169,45 @@ class DataStoreClearWriteLocalStore(context: Context) : ClearWriteLocalStore {
     val themePreferenceKey = stringPreferencesKey("theme_preference")
     val writingGoalKey = stringPreferencesKey("writing_goal")
     val selectionRewriteHintDismissedKey = booleanPreferencesKey("selection_rewrite_hint_dismissed")
+    val documentsKey = stringPreferencesKey("saved_documents")
+    val activeDocumentIdKey = stringPreferencesKey("active_document_id")
+
+    fun encodeDocuments(documents: List<SavedDocument>): String =
+      JSONArray().apply {
+        documents.forEach { document ->
+          put(
+            JSONObject().apply {
+              put("id", document.id)
+              put("title", document.title)
+              put("text", document.text)
+              put("importedFileName", document.importedFileName ?: JSONObject.NULL)
+              put("createdAt", document.createdAt)
+              put("updatedAt", document.updatedAt)
+            }
+          )
+        }
+      }.toString()
+
+    fun decodeDocuments(raw: String?): List<SavedDocument> =
+      runCatching {
+        if (raw.isNullOrBlank()) return@runCatching emptyList()
+        val json = JSONArray(raw)
+        buildList {
+          for (index in 0 until json.length()) {
+            val item = json.optJSONObject(index) ?: continue
+            val text = item.optString("text", "")
+            add(
+              SavedDocument(
+                id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
+                title = item.optString("title").ifBlank { "Untitled document" },
+                text = text,
+                importedFileName = item.optString("importedFileName").takeIf { it.isNotBlank() && it != "null" },
+                createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+                updatedAt = item.optLong("updatedAt", System.currentTimeMillis()),
+              )
+            )
+          }
+        }
+      }.getOrDefault(emptyList())
   }
 }

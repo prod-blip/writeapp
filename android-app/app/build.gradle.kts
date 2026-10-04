@@ -23,8 +23,8 @@ android {
         applicationId = "com.atulpandey.clearwrite"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 8
+        versionName = "1.0.7"
         buildConfigField("String", "PRO_PRODUCT_ID", "\"clearwrite_pro\"")
     }
 
@@ -83,6 +83,7 @@ dependencies {
 
   // Core Android dependencies
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.core.splashscreen)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.activity.compose)
 

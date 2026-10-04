@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
@@ -48,10 +49,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.atulpandey.clearwrite.analysis.AnalysisCategory
 import com.atulpandey.clearwrite.analysis.WritingGoal
 import com.atulpandey.clearwrite.data.ThemePreference
+import com.atulpandey.clearwrite.data.SavedDocument
 import com.atulpandey.clearwrite.billing.BillingUiState
 import com.atulpandey.clearwrite.billing.ProOffer
 import com.atulpandey.clearwrite.theme.ClearWriteSpacing
@@ -79,6 +82,7 @@ internal fun AppMenuSheet(
   onResetAiConsent: () -> Unit,
   onImportDocument: () -> Unit,
   onStartNewDocument: () -> Unit,
+  onOpenDocument: (String) -> Unit,
   onOpenUpgrade: () -> Unit,
   billingState: BillingUiState,
   onPurchase: (String) -> Unit,
@@ -92,7 +96,7 @@ internal fun AppMenuSheet(
       SheetHeader(destination.label, onDismiss)
       Spacer(Modifier.height(8.dp))
       when (destination) {
-        MenuDestination.DOCUMENT -> DocumentContent(uiState, onDismiss, onImportDocument, onStartNewDocument, onDeleteDocument)
+        MenuDestination.DOCUMENT -> DocumentContent(uiState, onImportDocument, onStartNewDocument, onOpenDocument, onDeleteDocument)
         MenuDestination.WRITING -> WritingContent(uiState, onCheckEnabledChanged, onEnableAllChecks, onWritingGoalChanged)
         MenuDestination.APP -> AppContent(uiState, onShowWordCountChanged, onThemePreferenceChanged, onResetAiConsent, onDeleteDocument, onOpenUpgrade)
         MenuDestination.UPGRADE -> UpgradeContent(billingState, onPurchase, onRestorePurchase)
@@ -112,9 +116,9 @@ private fun SheetHeader(title: String, onDismiss: () -> Unit) {
 @Composable
 private fun DocumentContent(
   uiState: MainScreenUiState,
-  onOpenDocument: () -> Unit,
   onImportDocument: () -> Unit,
   onStartNewDocument: () -> Unit,
+  onOpenDocument: (String) -> Unit,
   onDeleteDocument: () -> Unit,
 ) {
   Text(
@@ -123,7 +127,14 @@ private fun DocumentContent(
     color = MaterialTheme.colorScheme.primary,
   )
   Spacer(Modifier.height(12.dp))
-  if (uiState.text.isBlank()) {
+  if (uiState.isPro && uiState.savedDocuments.isNotEmpty()) {
+    SectionTitle("Saved documents")
+    Spacer(Modifier.height(8.dp))
+    uiState.savedDocuments.sortedByDescending(SavedDocument::updatedAt).forEach { document ->
+      DocumentListItem(document, document.id == uiState.activeDocumentId) { onOpenDocument(document.id) }
+      Spacer(Modifier.height(8.dp))
+    }
+  } else if (uiState.text.isBlank()) {
     Text("No saved document yet", style = MaterialTheme.typography.titleMedium)
     Text("Start writing in the editor. Your draft saves automatically on this device.", color = MaterialTheme.colorScheme.onSurfaceVariant)
   } else {
@@ -136,14 +147,48 @@ private fun DocumentContent(
         Text(uiState.text.replace(Regex("\\s+"), " ").take(180), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3)
       }
     }
-    TextButton(onClick = onOpenDocument, modifier = Modifier.fillMaxWidth()) { Text("Return to editor") }
+    TextButton(onClick = { uiState.activeDocumentId?.let(onOpenDocument) }, modifier = Modifier.fillMaxWidth()) { Text("Return to editor") }
   }
   HorizontalDivider(Modifier.padding(vertical = 12.dp))
   ActionRow(ClearWriteIcon.IMPORT, "Import document", "TXT or DOCX") { onImportDocument() }
-  ActionRow(ClearWriteIcon.DOCUMENT, "Start new document", "Replace the current draft") { onStartNewDocument() }
+  ActionRow(
+    ClearWriteIcon.DOCUMENT,
+    if (uiState.isPro) "New document" else "Start new document",
+    if (uiState.isPro) "Add to your document library" else "Replace the current draft",
+  ) { onStartNewDocument() }
   if (uiState.text.isNotBlank()) {
     TextButton(onClick = onDeleteDocument, modifier = Modifier.fillMaxWidth()) {
       Text("Delete saved document", color = MaterialTheme.colorScheme.error)
+    }
+  }
+}
+
+@Composable
+private fun DocumentListItem(document: SavedDocument, active: Boolean, onClick: () -> Unit) {
+  Surface(
+    modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+    shape = MaterialTheme.shapes.small,
+  ) {
+    Row(
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        document.title,
+        style = MaterialTheme.typography.bodyLarge,
+        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f),
+      )
+      if (active) {
+        ClearWriteIconGraphic(
+          ClearWriteIcon.CHECK,
+          MaterialTheme.colorScheme.primary,
+          Modifier.padding(start = 12.dp).size(18.dp),
+        )
+      }
     }
   }
 }
@@ -273,6 +318,7 @@ private fun UpgradeContent(
   }
   Spacer(Modifier.height(12.dp))
   FeatureLine("AI rewrite suggestions")
+  FeatureLine("Multiple saved documents")
   FeatureLine("Up to 10,000 words per draft")
   FeatureLine("Free local clarity checks remain available")
   Spacer(Modifier.height(18.dp))

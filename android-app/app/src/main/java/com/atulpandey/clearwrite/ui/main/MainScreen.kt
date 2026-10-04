@@ -7,14 +7,19 @@ import android.content.ContextWrapper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
@@ -70,14 +75,18 @@ import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
@@ -91,8 +100,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
@@ -106,6 +117,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.atulpandey.clearwrite.BuildConfig
+import com.atulpandey.clearwrite.R
 import com.atulpandey.clearwrite.analysis.AnalysisCategory
 import com.atulpandey.clearwrite.analysis.AnalysisResult
 import com.atulpandey.clearwrite.analysis.WritingIssue
@@ -121,7 +133,9 @@ import com.atulpandey.clearwrite.theme.ClearWriteType
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val supportedDocumentTypes =
   arrayOf(
@@ -154,6 +168,8 @@ fun MainScreen(
   var menuDestination by remember { mutableStateOf<MenuDestination?>(null) }
   var clearDocumentReason by remember { mutableStateOf<ClearDocumentReason?>(null) }
   var pendingImport by remember { mutableStateOf<ImportResult.Success?>(null) }
+  var renameDocument by remember { mutableStateOf(false) }
+  var pendingDocumentTitle by remember { mutableStateOf("") }
 
   LaunchedEffect(billingState.isPro) {
     viewModel.setProEntitled(billingState.isPro)
@@ -205,6 +221,10 @@ fun MainScreen(
     onRetryAi = viewModel::retryAiRewrite,
     onDismissAi = viewModel::dismissAiRewrite,
     onUndoAiEdit = viewModel::undoAiEdit,
+    onRenameDocument = {
+      pendingDocumentTitle = uiState.activeDocumentTitle
+      renameDocument = true
+    },
     onMenuDestinationSelected = { menuDestination = it },
     onMessageShown = viewModel::clearMessage,
     modifier = modifier,
@@ -238,7 +258,12 @@ fun MainScreen(
       },
       onStartNewDocument = {
         menuDestination = null
-        clearDocumentReason = ClearDocumentReason.START_NEW
+        if (uiState.isPro) viewModel.startNewDocument()
+        else clearDocumentReason = ClearDocumentReason.START_NEW
+      },
+      onOpenDocument = { documentId ->
+        viewModel.openDocument(documentId)
+        menuDestination = null
       },
       onOpenUpgrade = { menuDestination = MenuDestination.UPGRADE },
       billingState = billingState,
@@ -286,7 +311,11 @@ fun MainScreen(
       confirmButton = {
         TextButton(
           onClick = {
-            viewModel.startNewDocument()
+            if (reason == ClearDocumentReason.DELETE_SAVED && uiState.isPro) {
+              viewModel.deleteCurrentDocument()
+            } else {
+              viewModel.startNewDocument()
+            }
             clearDocumentReason = null
             menuDestination = null
           }
@@ -297,6 +326,32 @@ fun MainScreen(
       dismissButton = {
         TextButton(onClick = { clearDocumentReason = null }) { Text("Cancel") }
       },
+    )
+  }
+
+  if (renameDocument) {
+    AlertDialog(
+      onDismissRequest = { renameDocument = false },
+      title = { Text("Document title") },
+      text = {
+        OutlinedTextField(
+          value = pendingDocumentTitle,
+          onValueChange = { pendingDocumentTitle = it.take(MAX_DOCUMENT_TITLE_CHARACTERS) },
+          label = { Text("Title") },
+          singleLine = true,
+          supportingText = { Text("${pendingDocumentTitle.length}/$MAX_DOCUMENT_TITLE_CHARACTERS") },
+        )
+      },
+      confirmButton = {
+        TextButton(
+          enabled = pendingDocumentTitle.isNotBlank(),
+          onClick = {
+            viewModel.renameCurrentDocument(pendingDocumentTitle)
+            renameDocument = false
+          },
+        ) { Text("Save") }
+      },
+      dismissButton = { TextButton(onClick = { renameDocument = false }) { Text("Cancel") } },
     )
   }
 }
@@ -336,6 +391,7 @@ internal fun EditorScreen(
   onRetryAi: () -> Unit,
   onDismissAi: () -> Unit,
   onUndoAiEdit: () -> Unit,
+  onRenameDocument: () -> Unit,
   onMenuDestinationSelected: (MenuDestination) -> Unit,
   onMessageShown: () -> Unit,
   modifier: Modifier = Modifier,
@@ -347,13 +403,20 @@ internal fun EditorScreen(
   val scope = rememberCoroutineScope()
   val density = LocalDensity.current
   val editorFocusRequester = remember { FocusRequester() }
+  val editorScrollState = rememberScrollState()
   val analysisPeekHeight = remember(density.fontScale) {
     (ANALYSIS_PEEK_HEIGHT.value + ((density.fontScale - 1f).coerceAtLeast(0f) * 36f)).dp
   }
-  var editorValue by remember { mutableStateOf(TextFieldValue(uiState.text)) }
+  var editorValue by
+    remember(uiState.appliedAiHighlight?.documentRevision) {
+      mutableStateOf(TextFieldValue(uiState.text))
+    }
   var overflowOpen by remember { mutableStateOf(false) }
   var emphasizeIssueHighlight by remember { mutableStateOf(false) }
   var saveStatusVisible by remember { mutableStateOf(false) }
+  var lastRewriteSelection by remember { mutableStateOf<TextRange?>(null) }
+  var editorLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+  var pendingEditorScrollOffset by remember { mutableStateOf<Int?>(null) }
   val analysisSheetState =
     rememberStandardBottomSheetState(
       initialValue = if (uiState.showAnalysis) SheetValue.Expanded else SheetValue.PartiallyExpanded,
@@ -431,14 +494,19 @@ internal fun EditorScreen(
     }
   }
 
-  LaunchedEffect(uiState.message, uiState.undoText, uiState.messageTone) {
-    if (
-      uiState.message != null &&
-        uiState.undoText == null &&
-        uiState.messageTone != MessageTone.ERROR
-    ) {
-      delay(4_000)
+  LaunchedEffect(uiState.message, uiState.messageTone) {
+    if (uiState.message != null && uiState.messageTone != MessageTone.ERROR) {
+      delay(5_000)
       onMessageShown()
+    }
+  }
+
+  LaunchedEffect(editorValue.selection, uiState.documentRevision, uiState.selectionRewriteTarget) {
+    if (!editorValue.selection.collapsed) {
+      lastRewriteSelection = editorValue.selection
+    } else if (uiState.selectionRewriteTarget == null) {
+      delay(300)
+      if (editorValue.selection.collapsed) lastRewriteSelection = null
     }
   }
 
@@ -450,6 +518,7 @@ internal fun EditorScreen(
       // Keep the selection collapsed so Android does not draw its selection color over
       // the custom background. The cursor position still brings the highlight into view.
       editorValue = TextFieldValue(text = uiState.text, selection = TextRange(start))
+      pendingEditorScrollOffset = start
       keyboardController?.hide()
       focusManager.clearFocus()
     } else if (editorValue.text != uiState.text) {
@@ -486,7 +555,11 @@ internal fun EditorScreen(
     sheetPeekHeight = if (uiState.text.isBlank()) 0.dp else analysisPeekHeight,
     sheetDragHandle = null,
     sheetShape = MaterialTheme.shapes.extraLarge,
-    sheetContainerColor = MaterialTheme.colorScheme.surface,
+    // A barely tinted peek makes the collapsed analysis affordance feel separate from
+    // the editor. Expanded analysis returns to the normal surface for calmer reading.
+    sheetContainerColor =
+      if (uiState.showAnalysis) MaterialTheme.colorScheme.surface
+      else MaterialTheme.colorScheme.surfaceContainerLow,
     sheetShadowElevation = ClearWriteElevation.overlay,
     sheetContent = {
       if (uiState.text.isNotBlank()) {
@@ -518,6 +591,12 @@ internal fun EditorScreen(
       TopAppBar(
         title = {
           Row(verticalAlignment = Alignment.CenterVertically) {
+            Image(
+              painter = painterResource(R.drawable.ic_clearwrite_brand),
+              contentDescription = null,
+              modifier = Modifier.size(28.dp).clip(RoundedCornerShape(7.dp)),
+            )
+            Spacer(Modifier.width(ClearWriteSpacing.small))
             Text(text = "ClearWrite", style = MaterialTheme.typography.titleLarge)
             AnimatedVisibility(
               visible = saveStatusVisible,
@@ -593,7 +672,29 @@ internal fun EditorScreen(
             .widthIn(max = 760.dp)
             .padding(horizontal = ClearWriteSpacing.xLarge),
       ) {
-      if (uiState.importedFileName != null) {
+      if (uiState.isPro) {
+        Surface(
+          color = MaterialTheme.colorScheme.surfaceContainerLow,
+          shape = MaterialTheme.shapes.small,
+          modifier = Modifier.padding(bottom = ClearWriteSpacing.small).clickable(onClick = onRenameDocument),
+        ) {
+          Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = ClearWriteSpacing.medium, vertical = ClearWriteSpacing.small),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            ClearWriteIconGraphic(ClearWriteIcon.DOCUMENT, MaterialTheme.colorScheme.primary, Modifier.size(16.dp))
+            Text(
+              text = uiState.activeDocumentTitle,
+              style = MaterialTheme.typography.labelLarge,
+              color = MaterialTheme.colorScheme.onSurface,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.padding(start = ClearWriteSpacing.small).weight(1f),
+            )
+            Text("Rename", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+          }
+        }
+      } else if (uiState.importedFileName != null) {
         Surface(
           color = MaterialTheme.colorScheme.surfaceContainerLow,
           shape = MaterialTheme.shapes.small,
@@ -618,7 +719,26 @@ internal fun EditorScreen(
         }
       }
 
-      Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+      BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        val editorViewportHeight = maxHeight
+        LaunchedEffect(pendingEditorScrollOffset, editorViewportHeight) {
+          val requestedOffset = pendingEditorScrollOffset ?: return@LaunchedEffect
+          if (uiState.selectedIssue != null) delay(240)
+          val viewportHeightPx = with(density) { editorViewportHeight.toPx() }
+          val (layoutResult, maxScroll) =
+            snapshotFlow { editorLayoutResult to editorScrollState.maxValue }
+              .first { (layout, maxValue) ->
+                layout != null && (maxValue > 0 || layout.size.height <= viewportHeightPx)
+              }
+          val layout = layoutResult ?: return@LaunchedEffect
+          val safeOffset = requestedOffset.coerceIn(0, layout.layoutInput.text.length)
+          val cursorTop = layout.getCursorRect(safeOffset).top
+          editorScrollState.animateScrollTo(
+            editorScrollTarget(cursorTop, viewportHeightPx, maxScroll),
+          )
+          if (pendingEditorScrollOffset == requestedOffset) pendingEditorScrollOffset = null
+        }
+
         BasicTextField(
           value = editorValue,
           onValueChange = { updatedValue ->
@@ -628,10 +748,14 @@ internal fun EditorScreen(
           textStyle = ClearWriteType.editor.copy(color = MaterialTheme.colorScheme.onBackground),
           cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
           visualTransformation = editorHighlight,
+          onTextLayout = { editorLayoutResult = it },
           modifier =
-            Modifier.fillMaxSize()
-              .focusRequester(editorFocusRequester)
+            Modifier.fillMaxWidth()
+              .heightIn(min = editorViewportHeight)
               .nestedScroll(dismissKeyboardOnScroll)
+              .verticalScroll(editorScrollState)
+              .padding(end = 8.dp)
+              .focusRequester(editorFocusRequester)
               .semantics { contentDescription = "Writing editor" },
           decorationBox = { innerTextField ->
             Box(modifier = Modifier.fillMaxSize()) {
@@ -679,17 +803,20 @@ internal fun EditorScreen(
           }
         }
 
+        val rewriteSelection = lastRewriteSelection
         if (
-          !editorValue.selection.collapsed &&
+          rewriteSelection != null &&
             uiState.selectionRewriteTarget == null &&
             uiState.aiRewriteState is AiRewriteState.Idle
         ) {
           Button(
             onClick = {
-              val selectionStart = minOf(editorValue.selection.start, editorValue.selection.end)
-              val selectionEnd = maxOf(editorValue.selection.start, editorValue.selection.end)
+              val selectionStart = minOf(rewriteSelection.start, rewriteSelection.end)
+              val selectionEnd = maxOf(rewriteSelection.start, rewriteSelection.end)
               onSelectionRewriteRequested(selectionStart, selectionEnd)
+              lastRewriteSelection = null
               keyboardController?.hide()
+              focusManager.clearFocus(force = true)
             },
             modifier =
               Modifier.align(Alignment.BottomCenter)
@@ -705,11 +832,10 @@ internal fun EditorScreen(
           }
         }
 
-        if (uiState.appliedAiHighlight != null) {
-          AppliedChangeBadge(
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp),
-          )
-        }
+        EditorScrollbar(
+          scrollState = editorScrollState,
+          modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(3.dp),
+        )
       }
 
       AnimatedVisibility(
@@ -777,7 +903,11 @@ internal fun EditorScreen(
   if (uiState.aiRewriteState !is AiRewriteState.Idle) {
     AiRewriteSheet(
       state = uiState.aiRewriteState,
-      onApplySuggestion = onApplyAiSuggestion,
+      onApplySuggestion = { suggestion ->
+        keyboardController?.hide()
+        focusManager.clearFocus(force = true)
+        onApplyAiSuggestion(suggestion)
+      },
       onConfirmConsent = onConfirmAiConsent,
       onRetry = onRetryAi,
       onDismiss = onDismissAi,
@@ -795,6 +925,16 @@ internal fun issueHighlightTransformation(
     issueColor = highlightColor,
     appliedAiColor = highlightColor,
   )
+
+internal fun editorScrollTarget(
+  highlightedTopPx: Float,
+  viewportHeightPx: Float,
+  maxScroll: Int,
+): Int {
+  if (viewportHeightPx <= 0f || maxScroll <= 0) return 0
+  val contextAboveHighlight = viewportHeightPx * 0.24f
+  return (highlightedTopPx - contextAboveHighlight).roundToInt().coerceIn(0, maxScroll)
+}
 
 internal fun editorHighlightTransformation(
   issue: WritingIssue?,
@@ -1253,21 +1393,30 @@ private fun InlineMessage(
 }
 
 @Composable
-private fun AppliedChangeBadge(modifier: Modifier = Modifier) {
-  val colors = ClearWriteThemeTokens.colors
-  Surface(
-    color = colors.successContainer,
-    contentColor = colors.onSuccessContainer,
-    shape = RoundedCornerShape(50),
-    modifier = modifier.semantics {
-      contentDescription = "AI change applied and marked in the draft"
-      liveRegion = LiveRegionMode.Polite
-    },
-  ) {
-    Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-      ClearWriteIconGraphic(ClearWriteIcon.CHECK, colors.success, Modifier.size(15.dp))
-      Text("Updated", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 6.dp))
-    }
+private fun EditorScrollbar(scrollState: ScrollState, modifier: Modifier = Modifier) {
+  val alpha by animateFloatAsState(
+    targetValue =
+      when {
+        scrollState.maxValue <= 0 -> 0f
+        scrollState.isScrollInProgress -> 1f
+        else -> 0.38f
+      },
+    animationSpec = tween(durationMillis = if (scrollState.isScrollInProgress) 120 else 650),
+    label = "editor scrollbar",
+  )
+  val color = MaterialTheme.colorScheme.onSurfaceVariant
+  Canvas(modifier) {
+    if (alpha <= 0f || scrollState.maxValue <= 0 || size.height <= 0f) return@Canvas
+    val contentHeight = size.height + scrollState.maxValue
+    val thumbHeight = (size.height * (size.height / contentHeight)).coerceAtLeast(28.dp.toPx())
+    val travel = (size.height - thumbHeight).coerceAtLeast(0f)
+    val progress = scrollState.value.toFloat() / scrollState.maxValue.toFloat()
+    drawRoundRect(
+      color = color.copy(alpha = 0.55f * alpha),
+      topLeft = Offset(0f, travel * progress),
+      size = Size(size.width, thumbHeight),
+      cornerRadius = CornerRadius(size.width / 2f, size.width / 2f),
+    )
   }
 }
 
@@ -1535,6 +1684,7 @@ private fun EmptyEditorPreview() {
       onRetryAi = {},
       onDismissAi = {},
       onUndoAiEdit = {},
+      onRenameDocument = {},
       onMenuDestinationSelected = {},
       onMessageShown = {},
     )
@@ -1565,6 +1715,7 @@ private fun DraftEditorPreview() {
       onRetryAi = {},
       onDismissAi = {},
       onUndoAiEdit = {},
+      onRenameDocument = {},
       onMenuDestinationSelected = {},
       onMessageShown = {},
     )

@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.ClearWrite" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.ClearWrite" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Theme.ClearWrite.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/clearwrite_splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="windowSplashScreenAnimationDuration">240</item>
+        <item name="postSplashScreenTheme">@style/Theme.ClearWrite</item>
+    </style>
 </resources>
