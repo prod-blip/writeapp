@@ -38,6 +38,7 @@ data class BillingUiState(
   val isReady: Boolean = false,
   val isRefreshing: Boolean = true,
   val isPro: Boolean = false,
+  val isReviewerAccess: Boolean = false,
   val offers: List<ProOffer> = emptyList(),
   val message: String? = null,
 )
@@ -45,23 +46,30 @@ data class BillingUiState(
 class PlayBillingManager(
   context: Context,
   private val entitlementVerifier: EntitlementVerifier = PlayEntitlementVerifier(),
+  private val reviewerAccessVerifier: ReviewerAccessVerifier = BackendReviewerAccessVerifier(),
 ) : PurchasesUpdatedListener {
   private val appContext = context.applicationContext
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val entitlementCache = appContext.getSharedPreferences(CACHE_NAME, Context.MODE_PRIVATE)
   private val productDetails = AtomicReference<ProductDetails?>(null)
   private val currentPurchaseToken = AtomicReference<String?>(cachedToken())
+  private val currentReviewerToken = AtomicReference<String?>(cachedReviewerToken())
+  private val reviewerAccessIsValid = cachedReviewerAccessUntil() > System.currentTimeMillis() && cachedReviewerToken() != null
   private val _state =
     MutableStateFlow(
       BillingUiState(
         isRefreshing = true,
-        isPro = cachedAccessUntil() > System.currentTimeMillis() && cachedToken() != null,
+        isPro = cachedAccessUntil() > System.currentTimeMillis() && cachedToken() != null || reviewerAccessIsValid,
+        isReviewerAccess = reviewerAccessIsValid,
       )
     )
   val state: StateFlow<BillingUiState> = _state.asStateFlow()
 
   val activePurchaseToken: String?
-    get() = currentPurchaseToken.get().takeIf { _state.value.isPro }
+    get() = currentPurchaseToken.get().takeIf { cachedAccessUntil() > System.currentTimeMillis() }
+
+  val activeReviewerToken: String?
+    get() = currentReviewerToken.get().takeIf { cachedReviewerAccessUntil() > System.currentTimeMillis() }
 
   private val billingClient =
     BillingClient.newBuilder(appContext)
@@ -202,14 +210,17 @@ class PlayBillingManager(
         BuildConfig.PRO_PRODUCT_ID in it.products && it.purchaseState == Purchase.PurchaseState.PENDING
       }
     if (purchase == null) {
-      clearEntitlement()
+      clearPurchaseEntitlement()
+      val reviewerAccess = hasValidReviewerAccess()
       _state.update {
         it.copy(
           isRefreshing = false,
-          isPro = false,
+          isPro = reviewerAccess,
+          isReviewerAccess = reviewerAccess,
           message =
             when {
               pending -> "Your purchase is pending. Pro will activate after Google Play confirms payment."
+              reviewerAccess -> if (showSuccess) "Reviewer access is active." else it.message
               showSuccess -> "No active ClearWrite Pro subscription was found."
               else -> it.message
             },
@@ -232,28 +243,76 @@ class PlayBillingManager(
               it.copy(
                 isRefreshing = false,
                 isPro = true,
+                isReviewerAccess = false,
                 message = if (showSuccess) "ClearWrite Pro is active." else null,
               )
             }
           } else {
-            clearEntitlement()
+            clearPurchaseEntitlement()
+            val reviewerAccess = hasValidReviewerAccess()
             _state.update {
               it.copy(
                 isRefreshing = false,
-                isPro = false,
-                message = "Google Play did not confirm an active subscription.",
+                isPro = reviewerAccess,
+                isReviewerAccess = reviewerAccess,
+                message = if (reviewerAccess) "Reviewer access is active." else "Google Play did not confirm an active subscription.",
               )
             }
           }
         }
         .onFailure { error ->
           val cacheStillValid = cachedAccessUntil() > System.currentTimeMillis() && cachedToken() == token
+          val reviewerAccess = hasValidReviewerAccess()
           currentPurchaseToken.set(token.takeIf { cacheStillValid })
           _state.update {
             it.copy(
               isRefreshing = false,
-              isPro = cacheStillValid,
-              message = error.message ?: "Could not verify the subscription.",
+              isPro = cacheStillValid || reviewerAccess,
+              isReviewerAccess = !cacheStillValid && reviewerAccess,
+              message = if (reviewerAccess) "Reviewer access is active." else error.message ?: "Could not verify the subscription.",
+            )
+          }
+        }
+    }
+  }
+
+  fun activateReviewerAccess(code: String) {
+    val normalizedCode = code.trim()
+    if (normalizedCode.isEmpty()) {
+      _state.update { it.copy(message = "Enter the reviewer access code.") }
+      return
+    }
+    _state.update { it.copy(isRefreshing = true, message = "Verifying reviewer access…") }
+    scope.launch {
+      reviewerAccessVerifier.unlock(normalizedCode)
+        .onSuccess { entitlement ->
+          if (
+            entitlement.active &&
+              entitlement.reviewToken.isNotBlank() &&
+              entitlement.accessUntilMillis > System.currentTimeMillis()
+          ) {
+            cacheReviewerEntitlement(entitlement.reviewToken, entitlement.accessUntilMillis)
+            currentReviewerToken.set(entitlement.reviewToken)
+            _state.update {
+              it.copy(
+                isRefreshing = false,
+                isPro = true,
+                isReviewerAccess = true,
+                message = "Reviewer access is active.",
+              )
+            }
+          } else {
+            clearReviewerEntitlement()
+            _state.update {
+              it.copy(isRefreshing = false, message = "The reviewer access code could not be verified.")
+            }
+          }
+        }
+        .onFailure { error ->
+          _state.update {
+            it.copy(
+              isRefreshing = false,
+              message = error.message ?: "Could not verify reviewer access.",
             )
           }
         }
@@ -275,14 +334,33 @@ class PlayBillingManager(
     entitlementCache.edit().putString(KEY_TOKEN, token).putLong(KEY_ACCESS_UNTIL, cacheUntil).apply()
   }
 
-  private fun clearEntitlement() {
+  private fun clearPurchaseEntitlement() {
     currentPurchaseToken.set(null)
-    entitlementCache.edit().clear().apply()
+    entitlementCache.edit().remove(KEY_TOKEN).remove(KEY_ACCESS_UNTIL).apply()
   }
+
+  private fun cacheReviewerEntitlement(token: String, accessUntilMillis: Long) {
+    entitlementCache.edit()
+      .putString(KEY_REVIEWER_TOKEN, token)
+      .putLong(KEY_REVIEWER_ACCESS_UNTIL, accessUntilMillis)
+      .apply()
+  }
+
+  private fun clearReviewerEntitlement() {
+    currentReviewerToken.set(null)
+    entitlementCache.edit().remove(KEY_REVIEWER_TOKEN).remove(KEY_REVIEWER_ACCESS_UNTIL).apply()
+  }
+
+  private fun hasValidReviewerAccess(): Boolean =
+    cachedReviewerAccessUntil() > System.currentTimeMillis() && cachedReviewerToken() != null
 
   private fun cachedToken(): String? = entitlementCache.getString(KEY_TOKEN, null)
 
   private fun cachedAccessUntil(): Long = entitlementCache.getLong(KEY_ACCESS_UNTIL, 0L)
+
+  private fun cachedReviewerToken(): String? = entitlementCache.getString(KEY_REVIEWER_TOKEN, null)
+
+  private fun cachedReviewerAccessUntil(): Long = entitlementCache.getLong(KEY_REVIEWER_ACCESS_UNTIL, 0L)
 
   private fun BillingResult.userMessage(fallback: String): String =
     debugMessage.takeIf { it.isNotBlank() }?.let { "$fallback ($it)" } ?: fallback
@@ -291,6 +369,8 @@ class PlayBillingManager(
     const val CACHE_NAME = "clearwrite_billing"
     const val KEY_TOKEN = "verified_purchase_token"
     const val KEY_ACCESS_UNTIL = "verified_access_until"
+    const val KEY_REVIEWER_TOKEN = "reviewer_access_token"
+    const val KEY_REVIEWER_ACCESS_UNTIL = "reviewer_access_until"
     const val MAX_OFFLINE_CACHE_MILLIS = 24L * 60L * 60L * 1_000L
   }
 }

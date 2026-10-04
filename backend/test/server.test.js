@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { mockImprovement } from "../src/ai.js";
+import { grantReviewerAccess, verifyReviewerAccessToken } from "../src/reviewerAccess.js";
 import { createClearWriteServer, validateBillingRequest, validateRequest } from "../src/server.js";
 
 const validRequest = {
@@ -47,12 +48,25 @@ test("validates the configured Play product", () => {
   );
 });
 
+test("reviewer access tokens are signed and expire", () => {
+  const env = { CLEARWRITE_REVIEW_ACCESS_CODE: "clearwrite-review-code-123" };
+  const granted = grantReviewerAccess("clearwrite-review-code-123", env, 1_000);
+
+  assert.equal(verifyReviewerAccessToken(granted.reviewToken, env, 1_001), true);
+  assert.equal(verifyReviewerAccessToken(`${granted.reviewToken}tampered`, env, 1_001), false);
+  assert.equal(verifyReviewerAccessToken(granted.reviewToken, env, granted.accessUntilMillis), false);
+});
+
 let server;
 let baseUrl;
 
 before(async () => {
   server = createClearWriteServer(
-    { AI_PROVIDER: "mock", AI_DEV_TOKEN: "test-token" },
+    {
+      AI_PROVIDER: "mock",
+      AI_DEV_TOKEN: "test-token",
+      CLEARWRITE_REVIEW_ACCESS_CODE: "clearwrite-review-code-123",
+    },
     { verifyPurchase: async () => ({ active: true, accessUntilMillis: Date.now() + 60_000 }) },
   );
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -118,6 +132,28 @@ test("billing endpoint verifies a Play purchase token", async () => {
   assert.equal((await response.json()).active, true);
 });
 
+test("reviewer access endpoint rejects an invalid code", async () => {
+  const response = await fetch(`${baseUrl}/v1/reviewer/access`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: "incorrect-review-code" }),
+  });
+  assert.equal(response.status, 403);
+});
+
+test("reviewer access endpoint returns an expiring token", async () => {
+  const response = await fetch(`${baseUrl}/v1/reviewer/access`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: "clearwrite-review-code-123" }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.active, true);
+  assert.equal(typeof payload.reviewToken, "string");
+  assert.ok(payload.accessUntilMillis > Date.now());
+});
+
 test("production AI requires a verified Pro purchase", async () => {
   const productionServer = createClearWriteServer(
     { AI_PROVIDER: "mock", NODE_ENV: "production" },
@@ -142,6 +178,35 @@ test("production AI requires a verified Pro purchase", async () => {
       body: JSON.stringify(validRequest),
     });
     assert.equal(allowed.status, 200);
+  } finally {
+    await new Promise((resolve, reject) =>
+      productionServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test("production AI accepts a valid reviewer access token", async () => {
+  const env = {
+    AI_PROVIDER: "mock",
+    NODE_ENV: "production",
+    CLEARWRITE_REVIEW_ACCESS_CODE: "clearwrite-review-code-123",
+  };
+  const productionServer = createClearWriteServer(env, {
+    verifyPurchase: async () => ({ active: false, accessUntilMillis: 0 }),
+  });
+  await new Promise((resolve) => productionServer.listen(0, "127.0.0.1", resolve));
+  const productionUrl = `http://127.0.0.1:${productionServer.address().port}`;
+  try {
+    const { reviewToken } = grantReviewerAccess("clearwrite-review-code-123", env);
+    const response = await fetch(`${productionUrl}/v1/ai/improvements`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Reviewer-Access-Token": reviewToken,
+      },
+      body: JSON.stringify(validRequest),
+    });
+    assert.equal(response.status, 200);
   } finally {
     await new Promise((resolve, reject) =>
       productionServer.close((error) => (error ? reject(error) : resolve())),

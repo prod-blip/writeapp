@@ -20,11 +20,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -87,6 +89,7 @@ internal fun AppMenuSheet(
   billingState: BillingUiState,
   onPurchase: (String) -> Unit,
   onRestorePurchase: () -> Unit,
+  onReviewerAccess: (String) -> Unit,
 ) {
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(
@@ -99,7 +102,7 @@ internal fun AppMenuSheet(
         MenuDestination.DOCUMENT -> DocumentContent(uiState, onImportDocument, onStartNewDocument, onOpenDocument, onDeleteDocument)
         MenuDestination.WRITING -> WritingContent(uiState, onCheckEnabledChanged, onEnableAllChecks, onWritingGoalChanged)
         MenuDestination.APP -> AppContent(uiState, onShowWordCountChanged, onThemePreferenceChanged, onResetAiConsent, onDeleteDocument, onOpenUpgrade)
-        MenuDestination.UPGRADE -> UpgradeContent(billingState, onPurchase, onRestorePurchase)
+        MenuDestination.UPGRADE -> UpgradeContent(billingState, onPurchase, onRestorePurchase, onReviewerAccess)
       }
     }
   }
@@ -293,7 +296,10 @@ private fun UpgradeContent(
   billingState: BillingUiState,
   onPurchase: (String) -> Unit,
   onRestorePurchase: () -> Unit,
+  onReviewerAccess: (String) -> Unit,
 ) {
+  var showReviewerAccess by remember { mutableStateOf(false) }
+  var reviewerCode by remember { mutableStateOf("") }
   Surface(
     color = ClearWriteThemeTokens.colors.aiContainer,
     contentColor = ClearWriteThemeTokens.colors.onAiContainer,
@@ -310,7 +316,11 @@ private fun UpgradeContent(
         )
       }
       Text(
-        if (billingState.isPro) "Your subscription is active." else "Optional AI help for the moments you want it.",
+        when {
+          billingState.isReviewerAccess -> "Reviewer access is active."
+          billingState.isPro -> "Your subscription is active."
+          else -> "Optional AI help for the moments you want it."
+        },
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.padding(top = ClearWriteSpacing.small),
       )
@@ -346,12 +356,50 @@ private fun UpgradeContent(
   ) {
     Text("Restore purchase")
   }
+  if (!billingState.isPro) {
+    TextButton(
+      onClick = { showReviewerAccess = true },
+      enabled = !billingState.isRefreshing,
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      Text("Reviewer access")
+    }
+  }
   billingState.message?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
   if (!billingState.isPro && billingState.offers.isNotEmpty()) {
     Text(
       "Subscriptions renew automatically unless cancelled in Google Play.",
       style = MaterialTheme.typography.bodySmall,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+  if (showReviewerAccess) {
+    AlertDialog(
+      onDismissRequest = { showReviewerAccess = false },
+      title = { Text("Reviewer access") },
+      text = {
+        OutlinedTextField(
+          value = reviewerCode,
+          onValueChange = { reviewerCode = it.take(200) },
+          label = { Text("Review code") },
+          singleLine = true,
+        )
+      },
+      confirmButton = {
+        TextButton(
+          enabled = reviewerCode.isNotBlank(),
+          onClick = {
+            onReviewerAccess(reviewerCode)
+            reviewerCode = ""
+            showReviewerAccess = false
+          },
+        ) {
+          Text("Unlock Pro")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showReviewerAccess = false }) { Text("Cancel") }
+      },
     )
   }
 }

@@ -36,7 +36,10 @@ class MainActivity : ComponentActivity() {
       val billingManager = remember(applicationContext) { PlayBillingManager(applicationContext) }
       val aiRewriteRepository =
         remember(billingManager) {
-          AiRewriteRepository(purchaseTokenProvider = { billingManager.activePurchaseToken })
+          AiRewriteRepository(
+            purchaseTokenProvider = { billingManager.activePurchaseToken },
+            reviewerTokenProvider = { billingManager.activeReviewerToken },
+          )
         }
       DisposableEffect(billingManager) {
         onDispose { billingManager.close() }

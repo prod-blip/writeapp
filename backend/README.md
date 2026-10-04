@@ -40,6 +40,9 @@ export OPENAI_MODEL=your_chosen_model
 export GOOGLE_PLAY_PACKAGE_NAME=com.atulpandey.clearwrite
 export GOOGLE_PLAY_PRODUCT_ID=clearwrite_pro
 export GOOGLE_PLAY_SERVICE_ACCOUNT_JSON='the-complete-service-account-json'
+export CLEARWRITE_REVIEW_ACCESS_CODE='a-private-random-code-of-at-least-16-characters'
 ```
 
 The Google service account must be linked to the Play Console developer account and granted permission to view subscriptions and manage orders. Production deployment must use HTTPS. Before a broad launch, add durable distributed rate limits, Real-time Developer Notifications for immediate revocations, privacy-safe abuse monitoring, secret management, and spend alerts.
+
+`CLEARWRITE_REVIEW_ACCESS_CODE` enables the Play review team to unlock Pro without making a purchase. Keep it only in the hosting provider and Play Console's Sign in details. The backend exchanges it for a signed token that expires after 30 days; reviewers can enter the same code again during a later review. Never embed this code in the Android app or commit its real value.

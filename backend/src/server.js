@@ -3,6 +3,11 @@ import { pathToFileURL } from "node:url";
 import { improveWriting, ProviderError } from "./ai.js";
 import { GooglePlayError, verifyGooglePlaySubscription } from "./googlePlay.js";
 import { privacyPolicyHtml } from "./privacy.js";
+import {
+  grantReviewerAccess,
+  ReviewerAccessError,
+  verifyReviewerAccessToken,
+} from "./reviewerAccess.js";
 
 const MAX_BODY_BYTES = 16_384;
 const WINDOW_MS = 60_000;
@@ -48,25 +53,45 @@ export function createClearWriteServer(
       }
     }
 
+    if (request.method === "POST" && request.url === "/v1/reviewer/access") {
+      try {
+        const body = await readJsonBody(request);
+        if (!body || typeof body !== "object" || !validString(body.code, 1, 200)) {
+          return sendJson(response, 400, { error: "A reviewer access code is required." });
+        }
+        return sendJson(response, 200, grantReviewerAccess(body.code, env));
+      } catch (error) {
+        if (error instanceof HttpError || error instanceof ReviewerAccessError) {
+          return sendJson(response, error.statusCode, { error: error.message });
+        }
+        return sendJson(response, 500, { error: "Unexpected server error." });
+      }
+    }
+
     if (request.method !== "POST" || request.url !== "/v1/ai/improvements") {
       return sendJson(response, 404, { error: "Not found." });
     }
 
     if (env.NODE_ENV === "production") {
+      const reviewerToken = request.headers["x-reviewer-access-token"];
+      const reviewerAuthorized =
+        typeof reviewerToken === "string" && verifyReviewerAccessToken(reviewerToken, env);
       const purchaseToken = request.headers["x-play-purchase-token"];
-      if (typeof purchaseToken !== "string" || !purchaseToken) {
+      if (!reviewerAuthorized && (typeof purchaseToken !== "string" || !purchaseToken)) {
         return sendJson(response, 403, { error: "An active ClearWrite Pro subscription is required." });
       }
-      try {
-        const entitlement = await verifyPurchase(purchaseToken, env);
-        if (!entitlement.active) {
-          return sendJson(response, 403, { error: "An active ClearWrite Pro subscription is required." });
+      if (!reviewerAuthorized) {
+        try {
+          const entitlement = await verifyPurchase(purchaseToken, env);
+          if (!entitlement.active) {
+            return sendJson(response, 403, { error: "An active ClearWrite Pro subscription is required." });
+          }
+        } catch (error) {
+          if (error instanceof GooglePlayError) {
+            return sendJson(response, error.statusCode, { error: error.message });
+          }
+          return sendJson(response, 503, { error: "Subscription verification is temporarily unavailable." });
         }
-      } catch (error) {
-        if (error instanceof GooglePlayError) {
-          return sendJson(response, error.statusCode, { error: error.message });
-        }
-        return sendJson(response, 503, { error: "Subscription verification is temporarily unavailable." });
       }
     } else {
       const expectedToken = env.AI_DEV_TOKEN || "clearwrite-local-development";

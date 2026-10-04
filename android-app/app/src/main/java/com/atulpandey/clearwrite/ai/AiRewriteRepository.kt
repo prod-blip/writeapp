@@ -47,6 +47,7 @@ class AiRewriteRepository(
   private val backendUrl: String = BuildConfig.AI_BACKEND_URL,
   private val developmentToken: String = BuildConfig.AI_DEV_TOKEN,
   private val purchaseTokenProvider: () -> String? = { null },
+  private val reviewerTokenProvider: () -> String? = { null },
 ) : AiRewriteService {
   override suspend fun improve(request: AiRewriteRequest): AiRewriteResult =
     withContext(Dispatchers.IO) {
@@ -70,6 +71,9 @@ class AiRewriteRepository(
               }
               purchaseTokenProvider()?.takeIf { it.isNotBlank() }?.let {
                 setRequestProperty("X-Play-Purchase-Token", it)
+              }
+              reviewerTokenProvider()?.takeIf { it.isNotBlank() }?.let {
+                setRequestProperty("X-Reviewer-Access-Token", it)
               }
             }
         }.getOrElse {

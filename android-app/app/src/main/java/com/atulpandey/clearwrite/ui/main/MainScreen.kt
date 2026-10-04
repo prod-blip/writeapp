@@ -273,6 +273,7 @@ fun MainScreen(
         else billingManager?.launchPurchase(activity, offerToken)
       },
       onRestorePurchase = { billingManager?.restorePurchases() },
+      onReviewerAccess = { code -> billingManager?.activateReviewerAccess(code) },
     )
   }
 
